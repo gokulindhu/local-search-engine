@@ -8,3 +8,5 @@ Pillow
 python-docx 
 python-pptx 
 PyMuPDF
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve &
