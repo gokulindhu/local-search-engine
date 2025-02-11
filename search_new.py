@@ -243,7 +243,7 @@ def main():
     # docs_path = st.text_input("Documents folder path:")
     # if st.button("Index Documents") and docs_path:
         # with st.spinner("Indexing documents..."):
-    st.session_state.processor.index_documents('D:/project/content-search/scripts/files')
+    st.session_state.processor.index_documents('files')
 
     query = st.text_input("Enter your question:")
     if st.button("Search") and query:
