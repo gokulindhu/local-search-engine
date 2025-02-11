@@ -20,7 +20,8 @@ from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import sys
-
+OLLAMA_BASE_URL = "https://local-search-engine-hzjmswr4j4mkyrys5fxvmc.streamlit.app:11434"
+ollama.client = ollama.Client(host=OLLAMA_BASE_URL)
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
