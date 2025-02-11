@@ -1,0 +1,10 @@
+torch
+numpy 
+faiss-cpu 
+sentence-transformers 
+streamlit 
+ollama 
+Pillow 
+python-docx 
+python-pptx 
+PyMuPDF
