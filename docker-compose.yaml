@@ -1,0 +1,40 @@
+services:
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    runtime: nvidia  # <-- Add this line
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - ollama_network
+    restart: always
+
+  streamlit-app:
+    build: .
+    container_name: streamlit-app
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./files:/files
+    networks:
+      - ollama_network
+    restart: always
+
+networks:
+  ollama_network:
+    driver: bridge
+volumes:
+  ollama:

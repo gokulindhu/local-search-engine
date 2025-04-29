@@ -20,11 +20,13 @@ from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import sys
-OLLAMA_BASE_URL = "https://local-search-engine-hzjmswr4j4mkyrys5fxvmc.streamlit.app:11434"
-ollama.client = ollama.Client(host=OLLAMA_BASE_URL)
+import mimetypes
+import requests
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+ollama.BASE_URL = "http://ollama:11434"
 
 # Constants
 CHUNK_SIZE = 500
@@ -45,26 +47,35 @@ class DocumentProcessor:
     def __init__(self):
         self.model = SentenceTransformer(MODEL_NAME)
         self.dimension = self.model.get_sentence_embedding_dimension()
+        # Initialize FAISS index inside __init__
+        if hasattr(faiss, "IndexHNSWFlat"):
+            self.index = faiss.IndexHNSWFlat(self.dimension, 32)
+        else:
+            self.index = faiss.IndexFlatL2(self.dimension)  # Fallback for unsupported FAISS version
         self.index = None
         self.metadata: List[Dict[str, Any]] = []
         self._initialize_index()
         self.document_cache = {}  # Cache for document content
 
     def _initialize_index(self):
-        """Initialize or load existing FAISS index"""
+        """Initialize or load FAISS index"""
         try:
             if os.path.exists(INDEX_PATH) and os.path.exists(METADATA_PATH):
-                self.index = faiss.read_index(INDEX_PATH)
                 with open(METADATA_PATH, 'r') as f:
                     self.metadata = json.load(f)
-                logger.info("Loaded existing index and metadata")
+                logger.info("Loaded existing FAISS index")
             else:
-                self.index = faiss.IndexFlatIP(self.dimension)
-                logger.info("Created new index")
-
+                logger.info("Created new HNSW index")
         except Exception as e:
             logger.error(f"Error initializing index: {e}")
-            self.index = faiss.IndexFlatIP(self.dimension)
+
+    def read_file_binary(self, file_path: str) -> bytes:
+        try:
+            with open(file_path, 'rb') as f:
+                return f.read()
+        except Exception as e:
+            logger.error(f"Error reading file {file_path} in binary mode: {e}")
+            return b""
 
     @lru_cache(maxsize=1000)
     def chunk_text(self, text: str) -> List[str]:
@@ -117,8 +128,10 @@ class DocumentProcessor:
 
             if not file_paths:
                 st.warning("No supported documents found")
+                logger.info("No supported documents found in the directory")
                 return False
 
+            logger.info(f"Found {len(file_paths)} documents to index.")
             documents = []
             self.metadata = []
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -143,7 +156,7 @@ class DocumentProcessor:
             with open(METADATA_PATH, 'w') as f:
                 json.dump(self.metadata, f)
 
-            st.success(f"Indexed {len(documents)} text chunks from {len(file_paths)} files")
+            # st.success(f"Indexed {len(documents)} text chunks from {len(file_paths)} files")
             return True
 
         except Exception as e:
@@ -182,7 +195,6 @@ class DocumentProcessor:
                             content=chunk_content,
                             score=float(distances[0][i])
                         ))
-
                     except Exception as e:
                         logger.error(f"Error reading chunk: {e}")
                         continue
@@ -192,47 +204,54 @@ class DocumentProcessor:
             logger.error(f"Search error: {e}")
             st.error(f"Error during search: {str(e)}")
             return []
+
 @lru_cache(maxsize=100)
 def generate_answer(query: str, context: str) -> Tuple[str, Set[int]]:
     """
-    Generate answer using Ollama with caching and return referenced citations
-    Args:
-
-        query (str): The user's question
-        context (str): The context information from documents
-
-    Returns:
-
-        Tuple[str, Set[int]]: A tuple containing the generated answer and a set of citation indices
+    Generate answer using Ollama with streaming support and return referenced citations
     """
     try:
-
         prompt = f"""
-        Answer based on the context below. Be concise.
-        You must cite your sources using [0], [1], etc. for EVERY claim you make.
-        Make sure to use the citations explicitly in your answer.
-        Context:
-
-        {context}
-
+        Get only the related files based on the question and the provided context.
+        Be concise and do not include any external content, references, or URLs.
+        Cite sources explicitly from the given context using [0], [1], etc., for every claim made. Only use citations from the provided context.
+        Make sure to use the citations explicitly in your answer."
+        Context: {context}
         Question: {query}
-
         Answer:"""
-        response = ollama.generate(
-            model='qwen2.5-coder:14b',
-            prompt=prompt
-        )
+        logger.info(f"prompt: {prompt}")
+        start_time = time.time()
+        OLLAMA_URL = "http://ollama:11434/api/generate"
+        data = {
+            "model": "llama3.2:3b",
+            "prompt": prompt,
+            "stream": True  # Enable streaming
+        }
 
-        answer = response['response']
-        logger.info(f"answer: {answer}")
-        # Extract citation numbers from the answer
-        citations = set(int(num) for num in re.findall(r'\[(\d+)\]', answer))
-        logger.info(f"citations: {citations}")
-        return answer, citations
+        response = requests.post(OLLAMA_URL, json=data, stream=True)
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        logger.info(f"Response time: {elapsed_time:.4f} seconds")
+        answer = ""
+        citations = set()
+
+        # Stream the response in real-time
+        for chunk in response.iter_lines():
+            if chunk:
+                decoded_chunk = json.loads(chunk.decode('utf-8'))
+                token = decoded_chunk.get("response", "")
+                answer += token
+
+                # Extract citations on the fly
+                citations.update(set(int(num) for num in re.findall(r'\[(\d+)\]', answer)))
+
+                # Streamlit dynamic update
+                yield answer, citations
 
     except Exception as e:
         logger.error(f"Answer generation error: {e}")
-        return "Sorry, I couldn't generate an answer at this time.", set()
+        yield "Sorry, I couldn't generate an answer at this time.", set()
+
 def main():
     st.set_page_config(page_title="Local Search", layout="wide")
     
@@ -241,28 +260,43 @@ def main():
 
     st.title("Local Document Search")
 
-    # docs_path = st.text_input("Documents folder path:")
-    # if st.button("Index Documents") and docs_path:
-        # with st.spinner("Indexing documents..."):
-    st.session_state.processor.index_documents('files')
+    st.session_state.processor.index_documents('/files')
 
     query = st.text_input("Enter your question:")
+    
     if st.button("Search") and query:
         with st.spinner("Searching..."):
             results = st.session_state.processor.search(query)
-            logger.info(f"results: {results}")
             if results:
                 context = "\n\n".join(f"[{i}] {r.content}" for i, r in enumerate(results))
-                answer, citations = generate_answer(query, context)
+                
                 st.subheader("Answer")
-                st.write(answer)
+                answer_placeholder = st.empty()  # Placeholder for streaming response
+                
+                full_answer = ""
+                citations = set()
 
+                for partial_answer, partial_citations in generate_answer(query, context):
+                    full_answer = partial_answer
+                    citations = partial_citations
+                    answer_placeholder.write(full_answer)  # Update UI dynamically
+                logger.info(f"citations: {citations}")
                 if citations:
                     st.subheader("Referenced Documents")
+                    i = 0
                     for citation_num in sorted(citations):
                         if citation_num < len(results):
                             result = results[citation_num]
-                            with st.expander(f"Reference [{citation_num}] - {Path(result.path).name}") :
+                            with st.expander(f"Reference [{citation_num}] - {Path(result.path).name}"):
+                                file_data = st.session_state.processor.read_file_binary(str(result.path))
+                                i = i + 1
+                                st.download_button(
+                                    label="Download",
+                                    data=file_data,
+                                    file_name=Path(result.path).name,
+                                    mime=mimetypes.guess_type(str(result.path))[0] or "text/plain",
+                                    key=f"download_button_{i}"  # Unique key for each button
+                                )
                                 st.write(result.content)
                 else:
                     st.info("No specific documents were cited in the answer.")
